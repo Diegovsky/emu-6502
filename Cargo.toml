@@ -1,0 +1,12 @@
+[package]
+name = "emu-6502"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.5.0"
+bytemuck = "1.15.0"
+derive_more = "0.99.17"
+fehler = "1.0.0"
+macro_rules_attribute = "0.2.0"
+num_enum = "0.7.2"
