@@ -74,11 +74,29 @@ impl ValueSource {
     }
 }
 
+impl Value {
+    pub fn into_value_source(self) -> ValueSource {
+        match self {
+            Self::Mem(m) => ValueSource::Mem(m),
+            Self::Implied(i) => ValueSource::Implied(i),
+            Self::Immediate(i) => ValueSource::Immediate(i.into()),
+        }
+    }
+}
+
 impl<I> ValueSource<I> {
     pub fn mem(self) -> Option<MemAddressMode> {
         match self {
             Self::Mem(m) => Some(m),
             _ => None,
+        }
+    }
+
+    pub fn bytecount(self) -> usize {
+        match self {
+            Self::Implied(_) => 0,
+            Self::Immediate(_) => 1,
+            Self::Mem(mem) => mem.bytecount(),
         }
     }
 }
@@ -106,16 +124,6 @@ impl From<Void> for Word {
 
 pub type Value = ValueSource<Void>;
 
-impl<T> ValueSource<T> {
-    pub fn bytecount(self) -> usize {
-        match self {
-            Self::Implied(_) => 0,
-            Self::Immediate(_) => 1,
-            Self::Mem(mem) => mem.bytecount(),
-        }
-    }
-}
-
 #[apply(multivalue)]
 pub enum Flag {
     Negative,
@@ -134,13 +142,7 @@ pub enum StackOperand {
 }
 
 #[apply(multivalue)]
-pub enum JmpAddrMode {
-    Absolute(Addr),
-    Indirect(Addr),
-}
-
-#[apply(multivalue)]
-pub enum ArithmeticOp {
+pub enum AccOp {
     Add,
     Sub,
     Or,
@@ -149,49 +151,48 @@ pub enum ArithmeticOp {
 }
 
 #[apply(multivalue)]
-pub enum BitOp {
+pub enum UnOp {
     ShiftLeft,
     ShiftRight,
     RotateLeft,
     RotateRight,
+    Increment,
+    Decrement,
+    Bit,
 }
 
 #[apply(multivalue)]
 pub enum Instruction {
-    Bit {
+    UnOp {
         operand: Value,
-        operator: BitOp,
+        operator: UnOp,
     },
-    Arithmetic {
-        lhs: Value,
-        rhs: ValueSource,
-        op: ArithmeticOp,
+    AccOp {
+        operand: ValueSource,
+        op: AccOp,
     },
-    StackPush(StackOperand),
-    StackPop(StackOperand),
-    ClearBit(Flag),
+    Compare {
+        reg: RegType,
+        operand: ValueSource,
+    },
+    Break,
+    ChangeFlag(Flag, bool),
     Noop,
     Jump {
-        addr: JmpAddrMode,
+        addr: Addr,
+        indirect: bool,
         with_return: bool,
     },
-    ReturnFromSub,
-    Increment(Value),
-    Decrement(Value),
+    ReturnFromSub{ is_interrupt: bool },
+    StackTransfer { is_acc: bool, to_stack: bool },
+    TransferXS{rev:bool},
     Transfer {
         from: ValueSource,
         to: Value,
     },
-    Load {
-        reg: RegType,
-        from: ValueSource,
-    },
-    Store {
-        reg: RegType,
-        into: MemAddressMode,
-    },
     Branch {
         bit: Flag,
+        if_set: bool,
         offset: i8,
     },
 }
@@ -199,21 +200,20 @@ pub enum Instruction {
 impl Instruction {
     pub fn argcount(self) -> usize {
         match self {
-            Self::ReturnFromSub
+            Self::ReturnFromSub{..}
+            | Self::Break
             | Self::Noop
-            | Self::ClearBit(_)
-            | Self::StackPop(_)
-            | Self::StackPush(_) => 0,
+            | Self::ChangeFlag(..)
+            | Self::TransferXS {..}
+            | Self::StackTransfer {..} => 0,
+
+            Self::Compare { operand, .. } => operand.bytecount(),
 
             Self::Transfer { from, to } => from.bytecount() + to.bytecount(),
 
-            Self::Increment(addr) | Self::Decrement(addr) => addr.bytecount(),
+            Self::AccOp { operand: value, .. } => value.bytecount(),
 
-            Self::Load { reg: _, from: addr } => addr.bytecount(),
-            Self::Arithmetic { rhs: value, .. } => value.bytecount(),
-
-            Self::Store { into: addr, .. } => addr.bytecount(),
-            Self::Bit { operand, .. } => operand.bytecount(),
+            Self::UnOp { operand, .. } => operand.bytecount(),
 
             Self::Jump { .. } => std::mem::size_of::<Addr>(),
 

@@ -1,114 +1,239 @@
 use super::*;
+use num_enum::TryFromPrimitive;
 
 // Based on https://www.masswerk.at/6502/6502_instruction_set.html#layout
 // and https://llx.com/Neil/a2/opcodes.html
 
-impl Instruction {
-    fn decode_common_rhs(b: u8, args: &[u8; 2]) -> Option<MemAddressMode> {
-        if b & 1 == 0 {
-            return None
-        }
-        let src = match b {
-            1 => MemAddressMode::zpg(args[0]),
-            3 => MemAddressMode::abs(Addr::from_le_bytes(*args)),
-            5 => MemAddressMode::zpg_indexed(args[0], IndexType::X),
-            7 => MemAddressMode::abs_indexed(Addr::from_le_bytes(*args), IndexType::X),
-            _ => unreachable!(),
-        };
-        Some(src)
-    }
-    fn decode_c1_rhs(b: u8, args: &[u8; 2]) -> ValueSource {
-        match b {
-            0 => ValueSource::Mem(MemAddressMode::Zero {
-                addr: args[0],
-                indirect: true,
-                index: Some(IndexType::X),
-            }),
-            2 => ValueSource::Immediate(args[0]),
-            4 => ValueSource::Mem(MemAddressMode::Absolute {
-                addr: Addr::from_le_bytes(*args),
-                index: None,
-            }),
-            1 | 3 | 5 | 7 => Self::decode_common_rhs(b, args).unwrap().into(),
-            8.. => unreachable!("Invalid b value"),
-            _ => todo!(),
-        }
-    }
-    fn decode_c1(a: u8, b: u8, args: &[u8; 2]) -> Self {
-        let reg = RegType::A;
-        let rhs = Instruction::decode_c1_rhs(b, args);
-        if matches!(a, 0..=3 | 7) {
-            Self::Arithmetic {
-                lhs: reg.into(),
-                rhs,
-                op: match a {
-                    0 => ArithmeticOp::Or,
-                    1 => ArithmeticOp::And,
-                    2 => ArithmeticOp::Xor,
-                    3 => ArithmeticOp::Add,
-                    7 => ArithmeticOp::Sub,
-                    _ => unreachable!(),
-                },
-            }
-        } else {
-            match a {
-                4 => Self::Store {
-                    reg,
-                    into: rhs.mem().unwrap(),
-                },
-                5 => Self::Load { reg, from: rhs },
-                6 => Self::Load { reg, from: rhs },
-                _ => unreachable!(),
-            }
-        }
-    }
-    fn decode_c2(a: u8, b: u8, args: &[u8; 2]) -> Self {
-        type V = ValueSource;
-        let rhs: V = match b {
-            // I love exceptions, don't you?
-            6 if a == 4 => V::Implied(RegType::S),
-            6 if a == 5 => V::Implied(RegType::X),
-            5 if a == 4 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
-            5 if a == 5 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
-            0 if a == 5 => ValueSource::Immediate(args[0]),
-            2 if a == 7 => return Self::Noop,
-            2 if a <= 3 => V::Implied(RegType::A),
-            2 if a > 3 => V::Implied(RegType::A),
-            7 if a == 4 => unreachable!("Invalid bits for b {b:b}"),
-            1 | 3 | 5 | 7 => Self::decode_common_rhs(b, args).unwrap().into(),
-            _ => unreachable!("Invalid bits for b {b:b}"),
-        };
-        if a == 5 {
-            return Self::Transfer { to: RegType::X.into(), from: rhs }
-        }
-        let operand = rhs.into_value().unwrap();
-        match a {
-            0 => Self::Bit { operator: BitOp::ShiftLeft, operand },
-            1 => Self::Bit { operator: BitOp::RotateLeft, operand },
-            2 => Self::Bit { operator: BitOp::ShiftRight, operand },
-            3 => Self::Bit { operator: BitOp::RotateRight, operand },
-            4 => Self::Transfer { from: RegType::X.into(), to: operand },
-            6 => Self::Decrement(operand),
-            7 => Self::Increment(operand),
-            _ => unreachable!(),
-        }
-    }
-    fn decode_c0(a: u8, b: u8, args: &[u8; 2]) -> Self {
-        // This is the most insane part. Expect the ugliest code in earth
-        match b {
+#[derive(TryFromPrimitive, PartialEq, PartialOrd, Eq)]
+#[repr(u8)]
+enum C1 {
+    ORA = 0b000,
+    AND,
+    EOR,
+    ADC,
+    STA,
+    LDA,
+    CMP,
+    SBC
+}
 
-        }
+#[derive(TryFromPrimitive, PartialEq, PartialOrd, Eq)]
+#[repr(u8)]
+enum C2 {
+    ASL = 0b000,
+    ROL,
+    LSR,
+    ROR,
+    STX,
+    LDX,
+    DEC,
+    INC,
+}
+#[derive(TryFromPrimitive, PartialEq, PartialOrd, Eq)]
+#[repr(u8)]
+enum C3 {
+    BIT = 0b001,
+    STY = 0b100,
+    LDY,
+    CPY = 0b110,
+    CPX
+}
+
+
+impl Instruction {
+    fn decode_weird(ins: u8) -> Option<Self> {
+        Some(match ins {
+            // PHP
+            0x08 => Self::StackTransfer { is_acc: false, to_stack: true  },
+            // PLP
+            0x28 => Self::StackTransfer { is_acc: false, to_stack: false  },
+            // PHA
+            0x48 => Self::StackTransfer { is_acc: false, to_stack: true  },
+            // PLA
+            0x68 => Self::StackTransfer { is_acc: false, to_stack: true  },
+            // DEY
+            0x88 => Self::UnOp { operand: RegType::Y.into(), operator: UnOp::Decrement },
+            // TAY
+            0xA8 => Self::Transfer { from: RegType::A.into(), to: RegType::Y.into() },
+            // INY
+            0xC8 => Self::UnOp { operand: RegType::Y.into(), operator: UnOp::Increment },
+            // INX
+            0xE8 => Self::UnOp { operand: RegType::X.into(), operator: UnOp::Increment },
+            // --
+            // CLC
+            0x18 => Self::ChangeFlag(Flag::Carry, false),
+            // SEC
+            0x38 => Self::ChangeFlag(Flag::Carry, true),
+            // CLI
+            0x58 => Self::ChangeFlag(Flag::InterruptDisable, false),
+            // SEI
+            0x78 => Self::ChangeFlag(Flag::InterruptDisable, true),
+            // TYA
+            0x98 => Self::Transfer { from: RegType::Y.into(), to: RegType::A.into() },
+            // CLV
+            0xB8 => Self::ChangeFlag(Flag::Overflow, false),
+            // CLD
+            0xD8 => Self::ChangeFlag(Flag::Decimal, false),
+            // SED
+            0xF8 => Self::ChangeFlag(Flag::Decimal, true),
+            // TXS
+            0x9A => Self::TransferXS { rev: false },
+            // TSX
+            0xBA => Self::TransferXS { rev: true },
+            // DEX
+            0xCA => Self::UnOp { operand: RegType::X.into(), operator: UnOp::Decrement },
+            // NOP
+            0xEA => Self::Noop,
+            _ => return None
+        })
     }
-    pub fn decode(bytes: &[u8; 3]) -> Self {
+    #[rustfmt::skip]
+    pub fn decode(bytes: &[u8; 3]) -> Option<Self> {
         let ins = bytes[0];
-        let args = &[bytes[1], bytes[2]];
+        if let Some(v) = Self::decode_weird(ins) {
+            return Some(v);
+        }
+        let args = [bytes[1], bytes[2]];
         let a = ins >> 5;
         let b = (ins >> 2) & 0b111;
         let c = ins & 0b11;
         match c {
-            1 => Self::decode_c1(a, b, args),
-            2 => Self::decode_c2(a, b, args),
-            _ => unreachable!(),
+            1 => {
+                let a = C1::try_from(a).ok()?;
+                let operand: ValueSource = match b {
+                    0b000 => MemAddressMode::Zero { addr: args[0], indirect: true, index: Some(IndexType::X) }.into(),
+                    0b001 => MemAddressMode::zpg(args[0]).into(),
+                    0b010 => ValueSource::Immediate(args[0]),
+                    0b011 => MemAddressMode::abs(Addr::from_le_bytes(args)).into(),
+                    0b100 => MemAddressMode::Zero { addr: args[0], indirect: true, index: Some(IndexType::Y) }.into(),
+                    0b101 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
+                    0b110 => MemAddressMode::abs_indexed(Addr::from_le_bytes(args), IndexType::Y).into(),
+                    0b111 => MemAddressMode::abs_indexed(Addr::from_le_bytes(args), IndexType::X).into(),
+                    _ => unreachable!(),
+                };
+                let ins = match a {
+                    C1::ORA => Self::AccOp { operand, op: AccOp::Or },
+                    C1::AND => Self::AccOp { operand, op: AccOp::And },
+                    C1::EOR => Self::AccOp { operand, op: AccOp::Xor },
+                    C1::ADC => Self::AccOp { operand, op: AccOp::Add },
+                    C1::STA => Self::Transfer { from: RegType::A.into(), to: operand.into_value()? },
+                    C1::LDA => Self::Transfer { to: RegType::A.into(), from: operand },
+                    C1::CMP => Self::Compare { reg: RegType::A, operand, },
+                    C1::SBC => Self::AccOp { operand, op: AccOp::Sub },
+                };
+                Some(ins)
+            },
+            2 => {
+                let a = C2::try_from(a).ok()?;
+                let mut operand: ValueSource = match b {
+                    0b000 => ValueSource::Immediate(args[0]),
+                    0b001 => MemAddressMode::zpg(args[0]).into(),
+                    0b010 => RegType::A.into(),
+                    0b011 => MemAddressMode::abs(Addr::from_le_bytes(args)).into(),
+                    0b101 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
+                    0b111 => MemAddressMode::abs_indexed(Addr::from_le_bytes(args), IndexType::X).into(),
+                    b if b < 8 => return None,
+                    _ => unreachable!(),
+                };
+                // X-indexed is replaced by Y-indexed for these instructions
+                if matches!(a, C2::LDX|C2::STX) {
+                    if let ValueSource::Mem(MemAddressMode::Zero { index, .. }) = &mut operand {
+                        *index = Some(IndexType::Y)
+                    }
+                    if let ValueSource::Mem(MemAddressMode::Absolute { index, .. }) = &mut operand {
+                        // Weirdly, STX doesn't support this address mode
+                        if a == C2::STX {
+                            return None
+                        }
+                        *index = Some(IndexType::Y)
+                    }
+                }
+
+                // Instructions DEC and INC don't operate on the accumulator.
+                if a >= C2::DEC && matches!(operand, ValueSource::Implied(_)) {
+                    return None
+                }
+
+                // LDX is the only instruction here that takes an Immediate operand.
+                if a == C2::LDX {
+                    return Some(Self::Transfer { to: RegType::X.into(), from: operand })
+                }
+                let operand = operand.into_value()?;
+                let ins = match a {
+                    C2::ASL => Self::UnOp { operand, operator: UnOp::ShiftLeft },
+                    C2::ROL => Self::UnOp { operand, operator: UnOp::RotateLeft },
+                    C2::LSR => Self::UnOp { operand, operator: UnOp::ShiftRight },
+                    C2::ROR => Self::UnOp { operand, operator: UnOp::RotateRight },
+                    C2::STX => Self::Transfer { from: RegType::X.into(), to: operand },
+                    C2::LDX => unreachable!("Handled above"),
+                    C2::DEC => Self::UnOp { operand, operator: UnOp::Decrement },
+                    C2::INC => Self::UnOp { operand, operator: UnOp::Increment },
+                };
+                Some(ins)
+            }
+            // The most esoteric one.
+            0 => {
+                // Well, this part kinda makes sense
+                if let Ok(a) = C3::try_from(a) {
+                    let operand = match b {
+                        0b000 => ValueSource::Immediate(args[0]),
+                        0b001 => MemAddressMode::zpg(args[0]).into(),
+                        0b011 => MemAddressMode::abs(Addr::from_le_bytes(args)).into(),
+                        0b101 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
+                        0b111 => MemAddressMode::abs_indexed(Addr::from_le_bytes(args), IndexType::X).into(),
+                        b if b < 8 => return None,
+                        _ => unreachable!(),
+                    };
+                    let ins = match a {
+                        C3::BIT if matches!(b, 0b001|0b011) => Self::UnOp { operand: operand.into_value()?, operator: UnOp::Bit },
+                        C3::STY if matches!(b, 0b001..=0b101) => Self::Transfer { from: RegType::Y.into(), to: operand.into_value()? },
+                        C3::LDY => Self::Transfer { to: RegType::Y.into(), from: operand },
+                        C3::CPY if matches!(b, 0b001..=0b011) => Self::Compare { reg: RegType::Y, operand },
+                        C3::CPX if matches!(b, 0b001..=0b011) => Self::Compare { reg: RegType::X, operand },
+                        _ => return None,
+                    };
+                    return Some(ins)
+                }
+                // JMP
+                if a == 0b010 || a == 0b011{
+                    let addr = Addr::from_le_bytes(args);
+                    return Some(Self::Jump { addr, indirect: (a&1) != 0, with_return: false })
+                }
+                // The following instructions simply don't follow the 
+                // established a and b encoding.
+
+                // The "branch" instructions follow a xxy10000 encoding.
+                if ins & 0b00011111 == 0b10000 {
+                    // x indentifies the flag
+                    let x = ins >> 5;
+                    // y represents the compared value
+                    let y = (ins >> 4)&1;
+                    let if_set = y != 0;
+                    let offset = i8::from_le_bytes([args[0]]);
+                    let branch = match x {
+                        0b00 => Self::Branch { bit: Flag::Negative, offset, if_set },
+                        0b01 => Self::Branch { bit: Flag::Overflow, offset, if_set },
+                        0b10 => Self::Branch { bit: Flag::Carry, offset, if_set },
+                        0b11 => Self::Branch { bit: Flag::Zero, offset, if_set },
+                        _ => unreachable!(),
+                    };
+                    return Some(branch)
+                }
+
+                // The remaining ones
+                Some(match ins {
+                    0x00 => Self::Break,
+                    0x20 => Self::Jump { addr: Addr::from_le_bytes(args), indirect: false, with_return: true },
+                    0x40 => Self::ReturnFromSub { is_interrupt: true },
+                    0x60 => Self::ReturnFromSub { is_interrupt: false },
+                    // If we reached here, it's safe to assume the instruction
+                    // is invalid
+                    _ => return None
+
+                })
+
+            }
+            _ => None
         }
     }
 }

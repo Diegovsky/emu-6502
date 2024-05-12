@@ -7,7 +7,7 @@ mod regs;
 mod test;
 
 use instructions::{
-    ArithmeticOp, IndexType, Instruction, JmpAddrMode, MemAddressMode, RegType, StackOperand, Value, ValueSource
+    AccOp, IndexType, Instruction, MemAddressMode, RegType, StackOperand, Value, ValueSource
 };
 use regs::{Addr, FlagsRegister, Registers, Word};
 
@@ -201,55 +201,29 @@ impl State {
         let pc = self.registers.pc as usize;
         // get current instruction
         let instr = &self.memory[pc..pc+3];
-        let instr = Instruction::decode(instr.try_into().unwrap());
+        let instr = Instruction::decode(instr.try_into().unwrap()).unwrap();
         let mut jumped = false;
         match instr {
-            Instruction::Load { reg, from } => {
-                self.reg_write(reg, self.value_read(from)?)?;
-            }
-            Instruction::Store { reg, into } => {
-                let r = self.reg_read(reg)?;
-                let addr = self.resolve_addr(into)?;
-                self.mem_write(addr, r)?;
-            }
-            Instruction::Arithmetic{ lhs, rhs, op} => {
-                let result = {
-                    let lhs = self.value_read(lhs)?;
-                    let rhs = self.value_read(rhs)?;
-                    match op {
-                        ArithmeticOp::Add => lhs + rhs,
-                        o => todo!("{o:?}"),
-                    }
+            Instruction::AccOp{ operand, op} => {
+                let lhs = self.reg_read(RegType::A)?;
+                let rhs = self.value_read(operand)?;
+                let result = match op {
+                    AccOp::Add => lhs + rhs,
+                    o => todo!("{o:?}"),
                 };
-                self.value_write(lhs, result)?;
+                self.reg_write(RegType::A, result)?;
             }
-            Instruction::StackPop(operand) => {
-                let value = self.stack_pop()?;
-                match operand {
-                    StackOperand::A => self.reg_write(RegType::A, value)?,
-                    StackOperand::P => {
-                        self.registers.p = FlagsRegister::from_bits(value).unwrap();
-                    }
-                }
-            }
-            Instruction::StackPush(operand) => {
-                let value = match operand {
-                    StackOperand::A => self.registers.a.0,
-                    StackOperand::P => self.registers.p.bits(),
-                };
-                self.stack_push(value)?;
-            }
-            Instruction::Jump { addr, with_return } => {
-                let addr = match addr {
-                    JmpAddrMode::Absolute(val) => val,
-                    JmpAddrMode::Indirect(addr) => self.mem_read_addr(addr)?,
-                };
+            Instruction::Jump { addr, indirect, with_return } => {
                 if with_return {
                     let [lo, hi] = self.registers.pc.to_le_bytes();
                     self.stack_push(hi)?;
                     self.stack_push(lo)?;
                 }
-                self.registers.pc = addr;
+                if !indirect {
+                    self.registers.pc = addr;
+                } else {
+                    self.registers.pc = self.mem_read_addr(addr)?;
+                }
                 jumped = true;
             }
             Instruction::Noop => (),
