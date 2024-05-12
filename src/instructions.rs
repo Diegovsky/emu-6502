@@ -14,6 +14,7 @@ pub enum IndexType {
 #[apply(multivalue)]
 pub enum RegType {
     A,
+    S,
     Index(IndexType),
 }
 
@@ -36,13 +37,19 @@ pub enum MemAddressMode {
 }
 
 impl MemAddressMode {
-    pub fn zpg_indexed(addr: Word, index: IndexType) -> Self {
+    pub const fn zpg(addr: Word) -> Self {
+        MemAddressMode::Zero { addr, indirect: false, index: None }
+    }
+    pub const fn zpg_indexed(addr: Word, index: IndexType) -> Self {
         MemAddressMode::Zero { addr, indirect: false, index: Some(index) }
     }
-    pub fn abs_indexed(addr: Addr, index: IndexType) -> Self {
+    pub const fn abs(addr: Addr) -> Self {
+        Self::Absolute { addr, index: None }
+    }
+    pub const fn abs_indexed(addr: Addr, index: IndexType) -> Self {
         MemAddressMode::Absolute { addr, index: Some(index) }
     }
-    pub fn bytecount(&self) -> usize {
+    pub const fn bytecount(&self) -> usize {
         match self {
             MemAddressMode::Absolute { .. } => 2,
             MemAddressMode::Zero { .. } => 1,
@@ -145,26 +152,21 @@ pub enum ArithmeticOp {
 pub enum BitOp {
     ShiftLeft,
     ShiftRight,
-}
-
-#[apply(multivalue)]
-pub enum TransferDir {
-    XtoS,
-    StoX
+    RotateLeft,
+    RotateRight,
 }
 
 #[apply(multivalue)]
 pub enum Instruction {
     Bit {
-        operand: ValueSource,
-        op: BitOp,
+        operand: Value,
+        operator: BitOp,
     },
     Arithmetic {
         lhs: Value,
         rhs: ValueSource,
         op: ArithmeticOp,
     },
-    TransferSX(TransferDir),
     StackPush(StackOperand),
     StackPop(StackOperand),
     ClearBit(Flag),
@@ -201,7 +203,6 @@ impl Instruction {
             | Self::Noop
             | Self::ClearBit(_)
             | Self::StackPop(_)
-            | Self::TransferSX(_)
             | Self::StackPush(_) => 0,
 
             Self::Transfer { from, to } => from.bytecount() + to.bytecount(),

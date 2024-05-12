@@ -1,6 +1,7 @@
 use super::*;
 
 // Based on https://www.masswerk.at/6502/6502_instruction_set.html#layout
+// and https://llx.com/Neil/a2/opcodes.html
 
 impl Instruction {
     fn decode_common_rhs(b: u8, args: &[u8; 2]) -> Option<MemAddressMode> {
@@ -8,24 +9,10 @@ impl Instruction {
             return None
         }
         let src = match b {
-            1 => MemAddressMode::Zero {
-                addr: args[0],
-                indirect: false,
-                index: None,
-            },
-            3 => MemAddressMode::Absolute {
-                addr: Addr::from_le_bytes(*args),
-                index: None,
-            },
-            5 => MemAddressMode::Zero {
-                addr: args[0],
-                indirect: false,
-                index: Some(IndexType::X),
-            },
-            7 => MemAddressMode::Absolute {
-                addr: Addr::from_le_bytes(*args),
-                index: Some(IndexType::X),
-            },
+            1 => MemAddressMode::zpg(args[0]),
+            3 => MemAddressMode::abs(Addr::from_le_bytes(*args)),
+            5 => MemAddressMode::zpg_indexed(args[0], IndexType::X),
+            7 => MemAddressMode::abs_indexed(Addr::from_le_bytes(*args), IndexType::X),
             _ => unreachable!(),
         };
         Some(src)
@@ -76,20 +63,41 @@ impl Instruction {
         }
     }
     fn decode_c2(a: u8, b: u8, args: &[u8; 2]) -> Self {
-        let rhs: ValueSource = match b {
+        type V = ValueSource;
+        let rhs: V = match b {
             // I love exceptions, don't you?
-            6 if a == 4 => return Self::TransferSX(TransferDir::XtoS),
-            6 if a == 5 => return Self::TransferSX(TransferDir::StoX),
+            6 if a == 4 => V::Implied(RegType::S),
+            6 if a == 5 => V::Implied(RegType::X),
             5 if a == 4 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
             5 if a == 5 => MemAddressMode::zpg_indexed(args[0], IndexType::Y).into(),
             0 if a == 5 => ValueSource::Immediate(args[0]),
-            2 if a <= 3 => ValueSource::Implied(RegType::A),
-            2 if a > 3 => ValueSource::Implied(RegType::A),
+            2 if a == 7 => return Self::Noop,
+            2 if a <= 3 => V::Implied(RegType::A),
+            2 if a > 3 => V::Implied(RegType::A),
             7 if a == 4 => unreachable!("Invalid bits for b {b:b}"),
             1 | 3 | 5 | 7 => Self::decode_common_rhs(b, args).unwrap().into(),
             _ => unreachable!("Invalid bits for b {b:b}"),
         };
-        todo!()
+        if a == 5 {
+            return Self::Transfer { to: RegType::X.into(), from: rhs }
+        }
+        let operand = rhs.into_value().unwrap();
+        match a {
+            0 => Self::Bit { operator: BitOp::ShiftLeft, operand },
+            1 => Self::Bit { operator: BitOp::RotateLeft, operand },
+            2 => Self::Bit { operator: BitOp::ShiftRight, operand },
+            3 => Self::Bit { operator: BitOp::RotateRight, operand },
+            4 => Self::Transfer { from: RegType::X.into(), to: operand },
+            6 => Self::Decrement(operand),
+            7 => Self::Increment(operand),
+            _ => unreachable!(),
+        }
+    }
+    fn decode_c0(a: u8, b: u8, args: &[u8; 2]) -> Self {
+        // This is the most insane part. Expect the ugliest code in earth
+        match b {
+
+        }
     }
     pub fn decode(bytes: &[u8; 3]) -> Self {
         let ins = bytes[0];

@@ -92,6 +92,7 @@ impl Registers {
     #[inline]
     pub fn get_register(&self, register_type: RegType) -> Reg {
         match register_type {
+            RegType::S => self.s,
             RegType::A => self.a,
             RegType::Index(index) => self.get_index(index),
         }
@@ -99,6 +100,7 @@ impl Registers {
     #[inline]
     pub fn get_register_mut(&mut self, register_type: RegType) -> &mut Reg {
         match register_type {
+            RegType::S => &mut self.s,
             RegType::A => &mut self.a,
             RegType::Index(index) => self.get_index_mut(index),
         }
