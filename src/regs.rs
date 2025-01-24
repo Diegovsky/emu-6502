@@ -68,13 +68,13 @@ impl PartialOrd<Word> for Reg {
 bitflags::bitflags! {
     #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
     pub struct FlagsRegister: Word {
-        const N = 1<<7;
-        const V = 1<<6;
-        const B = 1<<4;
-        const D = 1<<3;
-        const I = 1<<2;
-        const Z = 1<<1;
-        const C = 1<<0;
+        const Negative = 1<<7;
+        const Overflow = 1<<6;
+        const Break = 1<<4;
+        const Decimal = 1<<3;
+        const InterruptDisable = 1<<2;
+        const Zero = 1<<1;
+        const Carry = 1<<0;
     }
 }
 
@@ -92,7 +92,6 @@ impl Registers {
     #[inline]
     pub fn get_register(&self, register_type: RegType) -> Reg {
         match register_type {
-            RegType::S => self.s,
             RegType::A => self.a,
             RegType::Index(index) => self.get_index(index),
         }
@@ -100,7 +99,6 @@ impl Registers {
     #[inline]
     pub fn get_register_mut(&mut self, register_type: RegType) -> &mut Reg {
         match register_type {
-            RegType::S => &mut self.s,
             RegType::A => &mut self.a,
             RegType::Index(index) => self.get_index_mut(index),
         }

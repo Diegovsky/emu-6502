@@ -1,3 +1,9 @@
+use std::{cmp::Ordering, collections::HashMap, mem::size_of};
+
+// use derive_more::{ From, TryInto };
+
+use bitflags::Flags;
+use bytemuck::Pod;
 use fehler::throws;
 
 pub(crate) mod utils;
@@ -7,11 +13,13 @@ mod regs;
 mod test;
 
 use instructions::{
-    AccOp, IndexType, Instruction, MemAddressMode, RegType, StackOperand, Value, ValueSource
+    AccOp, IndexType, Instruction, MemAddressMode, RegType, Value, ValueSource
 };
 use regs::{Addr, FlagsRegister, Registers, Word};
 
 pub use regs::Reg;
+
+use crate::instructions::UnOp;
 #[derive(Debug, Clone, Copy)]
 pub enum VmError {
     InvalidInstruction(Addr),
@@ -29,20 +37,44 @@ impl std::fmt::Display for VmError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AddrOrWord {
-    Addr(Addr),
-    Word(Word)
+fn relative_slice<T>(slice: &[T], start: usize, offset: usize) -> &[T] {
+    let end = start + offset;
+    &slice[start..end]
 }
 
-fn to_addr(slice: &[u8]) -> Addr {
-    Addr::from_le_bytes(slice.try_into().unwrap())
+/* #[derive(From, TryInto)]
+pub enum Num {
+    Word(Word),
+    Addr(Addr)
+} */
+
+/// A common trait all numbers implement.
+pub trait Num: Pod {}
+impl<N> Num for N where N: Pod {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Interrupt {
+    NMI,
+    Reset,
+    Irq,
+    Brk
 }
+
+impl Interrupt {
+    pub fn vector(self) -> Addr {
+        match self {
+            Self::NMI => 0xFFFA,
+            Self::Reset => 0xFFFC,
+            Self::Irq | Self::Brk => 0xFFFE
+        }
+    }
+}
+
 
 #[derive(Debug)]
 struct State {
     registers: Registers,
-    memory: Box<[Word; Addr::MAX as usize]>,
+    memory: Box<[Word; Addr::MAX as usize+1]>,
 }
 
 
@@ -50,26 +82,13 @@ impl State {
     pub fn new() -> Self {
         Self {
             registers: Registers::default(),
-            memory: Box::new([0; Addr::MAX as usize]),
+            memory: Box::new([0; Addr::MAX as usize+1]),
         }
     }
 
-    #[throws]
     #[inline]
-    pub fn set_reset(&mut self, addr: Addr) {
-        self.mem_write_addr(0xFFFC, addr)?;
-    }
-
-    #[throws]
-    #[inline]
-    pub fn set_nmi(&mut self, addr: Addr) {
-        self.mem_write_addr(0xFFFA, addr)?;
-    }
-
-    #[throws]
-    #[inline]
-    pub fn set_irq(&mut self, addr: Addr) {
-        self.mem_write_addr(0xFFFE, addr)?;
+    pub fn set_vector(&mut self, interrupt: Interrupt, addr: Addr) {
+        self.mem_write(interrupt.vector(), addr);
     }
 
     const STACK_START: Addr = 0x100;
@@ -77,61 +96,43 @@ impl State {
         self.registers.s.0 as Addr + Self::STACK_START
     }
 
-    #[throws]
-    pub fn stack_push(&mut self, val: Word) {
-        self.mem_write(self.stack_addr(), val)?;
-        self.registers.s -= 1;
-    }
-
-    pub fn stack_pop(&mut self) -> Result<Word> {
-        let val = self.mem_read(self.stack_addr())?;
-        self.registers.s += 1;
-        Ok(val.into())
-    }
-
-    #[throws]
     #[inline]
-    pub fn mem_write(&mut self, addr: Addr, val: Word) {
-        self.memory[addr as usize] = val;
+    pub fn stack_push<N: Num>(&mut self, num: N) {
+        let addr = self.stack_addr();
+        self.mem_write(addr, num);
+        self.registers.s -= size_of::<N>() as _;
     }
 
-    #[throws]
+    pub fn stack_pop<N: Num>(&mut self) -> Result<N> {
+        let val = self.mem_read::<N>(self.stack_addr());
+        self.registers.s += size_of::<N>() as u8;
+        Ok(val)
+    }
+
     #[inline]
-    pub fn mem_read(&self, addr: Addr) -> u8 {
-        self.memory[addr as usize]
+    pub fn mem_write<N: Num>(&mut self, addr: Addr, num: N) {
+        let bytes = bytemuck::bytes_of(&num);
+        self.memory[addr as usize..][..bytes.len()].copy_from_slice(bytes);
     }
 
-    #[throws]
     #[inline]
-    pub fn mem_write_addr(&mut self, addr: Addr, val: Addr) {
-        let [lo, hi] = val.to_le_bytes();
-        self.mem_write(addr, lo)?;
-        self.mem_write(addr + 1, hi)?;
+    #[track_caller]
+    pub fn mem_read<N: Num>(&self, addr: Addr) -> N {
+        let addr = addr as usize;
+        *bytemuck::from_bytes(relative_slice(&*self.memory, addr, size_of::<N>()))
     }
 
-    #[throws]
-    #[inline]
-    pub fn mem_read_addr(&self, addr: Addr) -> Addr {
-        let lo = self.mem_read(addr)?;
-        let hi = self.mem_read(addr + 1)?;
-        Addr::from_ne_bytes([lo, hi])
-    }
-
-    #[throws]
     fn reg_write(&mut self, reg: RegType, new: Word) {
-        let reg_value = self.registers.get_register(reg);
         let flags = &mut self.registers.p;
-        flags.set(FlagsRegister::Z, reg_value == 0 || new == reg_value.0);
-        flags.set(FlagsRegister::N, reg_value < new);
+        flags.set(FlagsRegister::Zero, new == 0);
+        flags.set(FlagsRegister::Negative, new >> 7 == 1);
         *self.registers.get_register_mut(reg) = Reg(new);
     }
 
-    #[throws]
     fn reg_read(&self, reg: RegType) -> Word {
         self.registers.get_register(reg).0
     }
 
-    #[throws]
     fn resolve_addr(&self, mem: MemAddressMode) -> Addr {
         match mem {
             MemAddressMode::Zero {
@@ -148,10 +149,10 @@ impl State {
                 } else {
                     match index.expect("todo: indirect absolute") {
                         IndexType::X => {
-                            self.mem_read_addr((self.registers.x + addr) as Addr)?
+                            self.mem_read((self.registers.x + addr) as Addr)
                         }
                         IndexType::Y => {
-                            let addr = self.mem_read_addr(addr as Addr)?;
+                            let addr = self.mem_read::<Addr>(addr as Addr);
                             addr + self.registers.y.0 as Addr
                         }
                     }
@@ -166,98 +167,125 @@ impl State {
         }
     }
 
-    #[throws]
-    fn value_write(&mut self, value_source: Value, value: Word) {
-        match value_source {
-            Value::Implied(reg) => self.registers.get_register_mut(reg).0 = value,
-            Value::Mem(mem) => self.mem_write(self.resolve_addr(mem)?, value)?,
+    fn value_write(&mut self, value: Value, num: Word) {
+        match value {
+            Value::Implied(reg) => self.reg_write(reg, num),
+            Value::Mem(mem) => self.mem_write(self.resolve_addr(mem), num),
             Value::Immediate(_) => unreachable!(),
         }
     }
 
-    #[throws]
     fn value_read<I>(&self, value_source: ValueSource<I>) -> Word where I: Into<Word> {
         match value_source {
             ValueSource::<I>::Immediate(val) => val.into(),
             ValueSource::<I>::Implied(reg) => self.registers.get_register(reg).0,
-            ValueSource::<I>::Mem(mem) => self.mem_read(self.resolve_addr(mem)?)?
+            ValueSource::<I>::Mem(mem) => self.mem_read(self.resolve_addr(mem))
         }
     }
 
-    #[throws]
-    fn jump_relative(&mut self, offset: Word) {
-        // offset is actually a signed number;
-        let offset = i8::from_ne_bytes(offset.to_ne_bytes());
-        self.registers.pc = self.registers.pc.overflowing_add_signed(offset as i16).0;
+    pub fn receive_interrupt(&mut self, interrupt: Interrupt) {
+        if interrupt != Interrupt::Reset {
+            let pc = self.registers.pc;
+            self.stack_push(pc);
+        }
+        self.registers.pc = self.mem_read(interrupt.vector());
     }
 
-    #[throws]
-    fn jump_abs(&mut self, addr: Addr) {
-        self.registers.pc = addr;
+    fn add(&mut self, reg: RegType, rhs: Word) {
+        let lhs = self.reg_read(reg);
+        let flags = &mut self.registers.p;
+        let (result, wrapped) = lhs.overflowing_add(rhs + (*flags&FlagsRegister::Carry).bits());
+        flags.set(FlagsRegister::Carry, wrapped);
+        self.reg_write(reg, result);
     }
 
-    #[throws]
-    pub fn execute(&mut self) -> bool {
-        let pc = self.registers.pc as usize;
-        // get current instruction
-        let instr = &self.memory[pc..pc+3];
-        let instr = Instruction::decode(instr.try_into().unwrap()).unwrap();
+    fn sub(&mut self, reg: RegType, rhs: Word) {
+        let lhs = self.reg_read(reg);
+        let flags = &mut self.registers.p;
+        let borrow = (*flags&FlagsRegister::Carry).bits();
+        let (result, wrapped) = lhs.overflowing_sub(rhs - borrow);
+        flags.set(FlagsRegister::Carry, !wrapped);
+        self.reg_write(reg, dbg!(result));
+    }
+
+    pub fn execute(&mut self, instruction: Instruction) -> bool {
         let mut jumped = false;
-        match instr {
+        match instruction {
+            Instruction::Break => {self.receive_interrupt(Interrupt::Brk); jumped = true},
             Instruction::AccOp{ operand, op} => {
-                let lhs = self.reg_read(RegType::A)?;
-                let rhs = self.value_read(operand)?;
-                let result = match op {
-                    AccOp::Add => lhs + rhs,
+                let rhs = self.value_read(operand);
+                match op {
+                    AccOp::Add => self.add(RegType::A, rhs),
+                    AccOp::Sub => self.sub(RegType::A, rhs),
                     o => todo!("{o:?}"),
-                };
-                self.reg_write(RegType::A, result)?;
+                }
             }
             Instruction::Jump { addr, indirect, with_return } => {
                 if with_return {
-                    let [lo, hi] = self.registers.pc.to_le_bytes();
-                    self.stack_push(hi)?;
-                    self.stack_push(lo)?;
+                    self.stack_push(self.registers.pc);
                 }
                 if !indirect {
                     self.registers.pc = addr;
                 } else {
-                    self.registers.pc = self.mem_read_addr(addr)?;
+                    self.registers.pc = self.mem_read(addr);
                 }
                 jumped = true;
             }
             Instruction::Noop => (),
-            ins => {
-                println!("Missing instruction impl: {ins:?}")
+            Instruction::ChangeFlag(flag, val) => self.registers.p.set(flag, val),
+            Instruction::Transfer { from, to } => self.value_write(to, self.value_read(from)),
+            Instruction::TransferXS { rev } => {
+                if rev {
+                    self.reg_write(RegType::X, self.registers.s.0);
+                } else {
+                    self.registers.s.0 = self.reg_read(RegType::X);
+                }
             }
-            /* InstructionType::AddIm => {
-            let (result, overflow) = self.registers.a.checked_add(args[0]);
-            if overflow {
-            self.registers.p.insert(FlagsRegister::C);
+            Instruction::Branch { bit, if_set, offset } => {
+                if self.registers.p.intersects(bit) == if_set {
+                    self.registers.pc = self.registers.pc.wrapping_add_signed(offset as _);
+                }
             }
-            self.register_write(RegType::A, result.0)?;
+            Instruction::UnOp { operand, operator } => {
+                let val = self.value_read(operand);
+                let res = match operator {
+                    UnOp::Increment => val.wrapping_add(1),
+                    UnOp::Decrement => val.wrapping_sub(1),
+                    UnOp::ShiftLeft => val<<1,
+                    UnOp::ShiftRight => val>>1,
+                    o => unimplemented!("{o:?}"),
+                };
+                self.value_write(operand, res);
+            },
+            Instruction::Compare { reg, operand } => {
+                // Save register value
+                let lhs = self.reg_read(reg);
+
+                self.registers.p.remove(FlagsRegister::Carry);
+                self.sub(reg, self.value_read(operand));
+                // Restore register value
+                self.registers.get_register_mut(reg).0 = lhs;
             }
-            InstructionType::JumpWithReturn => {
-            let next = self.registers.pc + i.bytecount()-1;
-            let [lo, hi] = next.to_le_bytes();
-            self.stack_push(lo)?;
-            self.stack_push(hi)?;
-            self.jump_abs(to_addr(args))?;
-            jumped = true;
-            }
-            InstructionType::ReturnFromSub => {
-            let lo = self.stack_pop()?;
-            let hi = self.stack_pop()?;
-            let addr = Addr::from_le_bytes([lo, hi]);
-            self.jump_abs(addr)?;
-            jumped = true;
-            }
-            InstructionType::Noop => (), */
-        }
+            ins => panic!("Missing instruction impl: {ins:?}"),
+        };
+        jumped
+    }
+
+    pub fn execute_next(&mut self) -> Result {
+        let pc = self.registers.pc as usize;
+        // get current instruction
+        let instr = &self.memory[pc..pc+3];
+        let instr = match Instruction::decode(instr.try_into().unwrap()) {
+            Some(i) => i,
+            None => return Err(Error::InvalidInstruction(pc as u16)),
+        };
+        // println!("INSTRUCTION: {}", format!("{instr:?}").split_once(' ').unwrap().0);
+        println!("{instr:?}");
+        let jumped = self.execute(instr);
         if !jumped {
             self.registers.pc += instr.bytecount() as u16;
         }
-        true
+        Ok(())
     }
 
     pub fn flash_memory(&mut self, bytes: &[u8]) {
@@ -270,17 +298,67 @@ pub const fn u8(i: i8) -> u8 {
     u8::from_ne_bytes(i.to_ne_bytes())
 }
 
-
-
 fn main() {
     let mut state = State::new();
+    let ops: Vec<Option<&str>> = serde_json::from_str(include_str!("../resources/ops.json")).unwrap();
     let asm = include_bytes!("../6502_tests/bin_files/6502_functional_test.bin");
     state.flash_memory(asm);
+    state.registers.pc = 0x400;
 
     let mut i = 0;
-    while state.execute().unwrap() {
+    let mut last_pc = state.registers.pc;
+    loop {
         println!("step {i} {:?}", state.registers);
+        if let Err(e) = state.execute_next() {
+            eprintln!("ERROR: {e}");
+            break
+        }
+        if state.registers.pc == last_pc {
+            eprintln!("ERROR");
+            break
+        }
         i += 1;
+        last_pc = state.registers.pc;
     }
-    println!("{state:?}");
+
+    let search_range = 10;
+    println!("Possible instructions around PC");
+    for offset in -search_range/2..search_range/2 {
+        let addr = state.registers.pc as i32 + offset;
+        let val = state.mem_read::<Word>(addr as u16);
+        println!("PC{}{}: {:?}", if offset < 0 { '-' } else {'+'}, offset.abs(), ops[val as usize]);
+    }
+    println!("Last instruction should have been: {:?}", ops[state.mem_read::<Word>(state.registers.pc) as usize]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmp_zero_flags_test() {
+        let mut state = State::new();
+        state.reg_write(RegType::A, 0);
+        state.execute(Instruction::Compare { reg: RegType::A, operand: ValueSource::Immediate(0) });
+        let flags = state.registers.p;
+        assert_eq!(flags, FlagsRegister::Zero|FlagsRegister::Carry);
+    }
+
+    #[test]
+    fn cmp_lt_flags_test() {
+        let mut state = State::new();
+        state.reg_write(RegType::A, 0);
+        state.execute(Instruction::Compare { reg: RegType::A, operand: ValueSource::Immediate(10) });
+        let flags = state.registers.p;
+        assert_eq!(flags, FlagsRegister::Negative);
+    }
+
+    #[test]
+    fn cmp_gt_flags_test() {
+        let mut state = State::new();
+        state.reg_write(RegType::A, 10);
+        state.execute(Instruction::Compare { reg: RegType::A, operand: ValueSource::Immediate(0) });
+        let flags = state.registers.p;
+        assert_eq!(flags, FlagsRegister::Carry);
+    }
 }

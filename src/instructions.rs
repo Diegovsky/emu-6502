@@ -1,6 +1,6 @@
 use macro_rules_attribute::apply;
 
-use crate::regs::{Addr, Word};
+use crate::regs::{Addr, FlagsRegister, Word};
 use crate::utils::multivalue;
 
 mod decode;
@@ -14,7 +14,6 @@ pub enum IndexType {
 #[apply(multivalue)]
 pub enum RegType {
     A,
-    S,
     Index(IndexType),
 }
 
@@ -125,17 +124,6 @@ impl From<Void> for Word {
 pub type Value = ValueSource<Void>;
 
 #[apply(multivalue)]
-pub enum Flag {
-    Negative,
-    Overflow,
-    Break,
-    Decimal,
-    InterruptDisable,
-    Zero,
-    Carry,
-}
-
-#[apply(multivalue)]
 pub enum StackOperand {
     A,
     P,
@@ -176,7 +164,7 @@ pub enum Instruction {
         operand: ValueSource,
     },
     Break,
-    ChangeFlag(Flag, bool),
+    ChangeFlag(FlagsRegister, bool),
     Noop,
     Jump {
         addr: Addr,
@@ -191,7 +179,7 @@ pub enum Instruction {
         to: Value,
     },
     Branch {
-        bit: Flag,
+        bit: FlagsRegister,
         if_set: bool,
         offset: i8,
     },

@@ -1,4 +1,5 @@
 use super::*;
+use crate::regs::FlagsRegister as Flag;
 use num_enum::TryFromPrimitive;
 
 // Based on https://www.masswerk.at/6502/6502_instruction_set.html#layout
@@ -34,9 +35,9 @@ enum C2 {
 enum C3 {
     BIT = 0b001,
     STY = 0b100,
-    LDY,
+    LDY = 0b101,
     CPY = 0b110,
-    CPX
+    CPX = 0b111,
 }
 
 
@@ -89,6 +90,7 @@ impl Instruction {
     }
     #[rustfmt::skip]
     pub fn decode(bytes: &[u8; 3]) -> Option<Self> {
+        println!("{bytes:x?}");
         let ins = bytes[0];
         if let Some(v) = Self::decode_weird(ins) {
             return Some(v);
@@ -171,8 +173,34 @@ impl Instruction {
                 };
                 Some(ins)
             }
-            // The most esoteric one.
+            // The most esoteric ones.
             0 => {
+                // JMP
+                if a == 0b010 || a == 0b011{
+                    let addr = Addr::from_le_bytes(args);
+                    return Some(Self::Jump { addr, indirect: (a&1) != 0, with_return: false })
+                }
+                // The following instructions simply don't follow the 
+                // established a and b encoding.
+
+                // The "branch" instructions follow a xxy10000 encoding.
+                if ins & 0b00011111 == 0b10000 {
+                    // x indentifies the flag
+                    let x = ins >> 6;
+                    // y represents the compared value
+                    let y = (ins >> 5)&1;
+                    let if_set = y == 1;
+                    let offset = i8::from_le_bytes([args[0]]);
+                    let branch = match x {
+                        0b00 => Self::Branch { bit: Flag::Negative, offset, if_set },
+                        0b01 => Self::Branch { bit: Flag::Overflow, offset, if_set },
+                        0b10 => Self::Branch { bit: Flag::Carry, offset, if_set },
+                        0b11 => Self::Branch { bit: Flag::Zero, offset, if_set },
+                        _ => unreachable!(),
+                    };
+                    return Some(branch)
+                }
+
                 // Well, this part kinda makes sense
                 if let Ok(a) = C3::try_from(a) {
                     let operand = match b {
@@ -193,31 +221,6 @@ impl Instruction {
                         _ => return None,
                     };
                     return Some(ins)
-                }
-                // JMP
-                if a == 0b010 || a == 0b011{
-                    let addr = Addr::from_le_bytes(args);
-                    return Some(Self::Jump { addr, indirect: (a&1) != 0, with_return: false })
-                }
-                // The following instructions simply don't follow the 
-                // established a and b encoding.
-
-                // The "branch" instructions follow a xxy10000 encoding.
-                if ins & 0b00011111 == 0b10000 {
-                    // x indentifies the flag
-                    let x = ins >> 5;
-                    // y represents the compared value
-                    let y = (ins >> 4)&1;
-                    let if_set = y != 0;
-                    let offset = i8::from_le_bytes([args[0]]);
-                    let branch = match x {
-                        0b00 => Self::Branch { bit: Flag::Negative, offset, if_set },
-                        0b01 => Self::Branch { bit: Flag::Overflow, offset, if_set },
-                        0b10 => Self::Branch { bit: Flag::Carry, offset, if_set },
-                        0b11 => Self::Branch { bit: Flag::Zero, offset, if_set },
-                        _ => unreachable!(),
-                    };
-                    return Some(branch)
                 }
 
                 // The remaining ones
